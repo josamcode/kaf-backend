@@ -37,9 +37,14 @@ const personSchema = new mongoose.Schema({
     maxlength: 100
   },
   year: {
-    type: Number,
-    enum: [1, 2, 3, 4, 5],
-    required: true
+    type: mongoose.Schema.Types.Mixed,
+    required: true,
+    validate: {
+      validator: function (v) {
+        return [1, 2, 3, 4, 5, 'graduated'].includes(v);
+      },
+      message: 'Year must be between 1 and 5 or graduated'
+    }
   },
   phone: {  
     type: String,

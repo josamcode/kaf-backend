@@ -18,6 +18,7 @@ const STATS_CACHE_PREFIX = 'persons:stats:';
 const PERSONS_CACHE_PREFIX = 'persons:list:';
 const FORM_OPTIONS_CACHE_PREFIX = 'persons:form-options:';
 const PERSON_WRITE_CACHE_PREFIXES = [STATS_CACHE_PREFIX, PERSONS_CACHE_PREFIX, FORM_OPTIONS_CACHE_PREFIX];
+const ALLOWED_YEARS = new Set([1, 2, 3, 4, 5, 'graduated']);
 const PERSON_MUTABLE_FIELDS = new Set([
   'name',
   'gender',
@@ -30,6 +31,12 @@ const PERSON_MUTABLE_FIELDS = new Set([
   'phone',
   'customFields'
 ]);
+
+const normalizeYearValue = (value) => {
+  if (value === 'graduated') return 'graduated';
+  const parsed = Number.parseInt(value, 10);
+  return [1, 2, 3, 4, 5].includes(parsed) ? parsed : undefined;
+};
 
 const validate = (rules) => [
   ...rules,
@@ -141,7 +148,12 @@ const buildPersonFilter = ({ queryParams, user }) => {
     }
   }
 
-  if (year) filter.year = Number.parseInt(year, 10);
+  if (year) {
+    const normalizedYear = normalizeYearValue(year);
+    if (normalizedYear !== undefined) {
+      filter.year = normalizedYear;
+    }
+  }
   if (origin) filter.origin = new RegExp(escapeRegExp(String(origin).trim()), 'i');
   if (college) filter.college = new RegExp(escapeRegExp(String(college).trim()), 'i');
   if (university) filter.university = new RegExp(escapeRegExp(String(university).trim()), 'i');
@@ -187,6 +199,15 @@ const pickPersonPayload = (bodyPayload) => {
     }
   }
 
+  if (Object.prototype.hasOwnProperty.call(data, 'year')) {
+    const normalizedYear = normalizeYearValue(data.year);
+    if (normalizedYear === undefined) {
+      delete data.year;
+    } else {
+      data.year = normalizedYear;
+    }
+  }
+
   return data;
 };
 
@@ -200,7 +221,9 @@ router.get('/', [
     query('page').optional().isInt({ min: 1 }),
     query('limit').optional().isInt({ min: 1, max: 200 }),
     query('gender').optional().isIn(['boy', 'girl']),
-    query('year').optional().isInt({ min: 1, max: 5 })
+    query('year')
+      .optional()
+      .custom((value) => ALLOWED_YEARS.has(normalizeYearValue(value)))
   ])
 ], asyncHandler(async (req, res) => {
   const { page, limit } = parsePagination(req.query.page, req.query.limit);
@@ -411,7 +434,9 @@ router.post('/', [
   ...validate([
     body('name').trim().notEmpty().withMessage('الاسم مطلوب'),
     body('gender').isIn(['boy', 'girl']).withMessage('النوع يجب أن يكون ولد أو بنت'),
-    body('year').isInt({ min: 1, max: 5 }).withMessage('السنة يجب أن تكون بين 1 و 5'),
+    body('year')
+      .custom((value) => ALLOWED_YEARS.has(normalizeYearValue(value)))
+      .withMessage('السنة يجب أن تكون بين 1 و 5 أو متخرج'),
     body('phone').trim().notEmpty().withMessage('رقم الهاتف مطلوب'),
     body('origin').trim().notEmpty().withMessage('البلد الأصلية مطلوبة')
   ])
@@ -449,7 +474,9 @@ router.put('/:id', [
   ...validate([
     body('name').trim().notEmpty().withMessage('الاسم مطلوب'),
     body('gender').isIn(['boy', 'girl']).withMessage('النوع يجب أن يكون ولد أو بنت'),
-    body('year').isInt({ min: 1, max: 5 }).withMessage('السنة يجب أن تكون بين 1 و 5'),
+    body('year')
+      .custom((value) => ALLOWED_YEARS.has(normalizeYearValue(value)))
+      .withMessage('السنة يجب أن تكون بين 1 و 5 أو متخرج'),
     body('phone').trim().notEmpty().withMessage('رقم الهاتف مطلوب'),
     body('origin').trim().notEmpty().withMessage('البلد الأصلية مطلوبة')
   ])
