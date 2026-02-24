@@ -436,7 +436,7 @@ router.post('/', [
     body('gender').isIn(['boy', 'girl']).withMessage('النوع يجب أن يكون ولد أو بنت'),
     body('year')
       .custom((value) => ALLOWED_YEARS.has(normalizeYearValue(value)))
-      .withMessage('السنة يجب أن تكون بين 1 و 5 أو متخرج'),
+      .withMessage('السنة يجب أن تكون بين 1 و 5 أو خريج'),
     body('phone').trim().notEmpty().withMessage('رقم الهاتف مطلوب'),
     body('origin').trim().notEmpty().withMessage('البلد الأصلية مطلوبة')
   ])
@@ -476,7 +476,7 @@ router.put('/:id', [
     body('gender').isIn(['boy', 'girl']).withMessage('النوع يجب أن يكون ولد أو بنت'),
     body('year')
       .custom((value) => ALLOWED_YEARS.has(normalizeYearValue(value)))
-      .withMessage('السنة يجب أن تكون بين 1 و 5 أو متخرج'),
+      .withMessage('السنة يجب أن تكون بين 1 و 5 أو خريج'),
     body('phone').trim().notEmpty().withMessage('رقم الهاتف مطلوب'),
     body('origin').trim().notEmpty().withMessage('البلد الأصلية مطلوبة')
   ])
