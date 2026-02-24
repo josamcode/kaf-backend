@@ -1,16 +1,23 @@
-const express = require('express');
+﻿const express = require('express');
 const { body, query, validationResult } = require('express-validator');
 const Person = require('../models/Person');
 const { authenticateToken, checkPermission, checkGenderAccess } = require('../middleware/auth');
 const asyncHandler = require('../utils/asyncHandler');
 const cache = require('../utils/cache');
-const { escapeRegExp, normalizeGender } = require('../utils/sanitize');
+const {
+  escapeRegExp,
+  normalizeGender,
+  normalizeOrigin,
+  sanitizeOriginValues,
+  buildExactOriginRegex
+} = require('../utils/sanitize');
 
 const router = express.Router();
 
 const STATS_CACHE_PREFIX = 'persons:stats:';
 const PERSONS_CACHE_PREFIX = 'persons:list:';
-const PERSON_WRITE_CACHE_PREFIXES = [STATS_CACHE_PREFIX, PERSONS_CACHE_PREFIX];
+const FORM_OPTIONS_CACHE_PREFIX = 'persons:form-options:';
+const PERSON_WRITE_CACHE_PREFIXES = [STATS_CACHE_PREFIX, PERSONS_CACHE_PREFIX, FORM_OPTIONS_CACHE_PREFIX];
 const PERSON_MUTABLE_FIELDS = new Set([
   'name',
   'gender',
@@ -31,7 +38,7 @@ const validate = (rules) => [
     if (!errors.isEmpty()) {
       return res.status(400).json({
         success: false,
-        message: 'Validation errors',
+        message: 'أخطاء في التحقق من البيانات',
         errors: errors.array()
       });
     }
@@ -55,6 +62,41 @@ const hasGenderAccess = (user, personGender) => {
   return accessibleGender === 'both' || accessibleGender === personGender;
 };
 
+const userAccessibleOrigins = (user) => {
+  if (user.role === 'super_admin') return [];
+  return sanitizeOriginValues(user.allowedOrigins);
+};
+
+const hasOriginAccess = (user, personOrigin) => {
+  if (user.role === 'super_admin') return true;
+  const allowedOrigins = userAccessibleOrigins(user);
+  if (allowedOrigins.length === 0) return true;
+
+  const targetOrigin = normalizeOrigin(personOrigin);
+  return allowedOrigins.some((origin) => normalizeOrigin(origin) === targetOrigin);
+};
+
+const appendOriginAccessToFilter = (filter, user) => {
+  if (user.role === 'super_admin') return filter;
+
+  const allowedOrigins = userAccessibleOrigins(user);
+  if (allowedOrigins.length === 0) return filter;
+
+  const allowedOriginClause = allowedOrigins.length === 1
+    ? { origin: buildExactOriginRegex(allowedOrigins[0]) }
+    : {
+      $or: allowedOrigins.map((origin) => ({
+        origin: buildExactOriginRegex(origin)
+      }))
+    };
+
+  if (!filter.$and) {
+    filter.$and = [];
+  }
+  filter.$and.push(allowedOriginClause);
+  return filter;
+};
+
 const parsePagination = (page, limit) => {
   const parsedPage = Number.parseInt(page, 10);
   const parsedLimit = Number.parseInt(limit, 10);
@@ -63,6 +105,25 @@ const parsePagination = (page, limit) => {
     page: Number.isInteger(parsedPage) && parsedPage > 0 ? parsedPage : 1,
     limit: Number.isInteger(parsedLimit) && parsedLimit > 0 ? Math.min(parsedLimit, 200) : 50
   };
+};
+
+const normalizeOptionValues = (values) => {
+  return [...new Set(
+    (values || [])
+      .map((value) => String(value || '').trim())
+      .filter(Boolean)
+  )].sort((a, b) => a.localeCompare(b, 'ar', { sensitivity: 'base' }));
+};
+
+const buildFormOptionsMatch = (user) => {
+  const filter = { isActive: true };
+  if (user.role !== 'super_admin') {
+    const access = userAccessibleGender(user);
+    if (access !== 'both') {
+      filter.gender = access;
+    }
+  }
+  return appendOriginAccessToFilter(filter, user);
 };
 
 const buildPersonFilter = ({ queryParams, user }) => {
@@ -97,7 +158,7 @@ const buildPersonFilter = ({ queryParams, user }) => {
     ];
   }
 
-  return filter;
+  return appendOriginAccessToFilter(filter, user);
 };
 
 const toSafeCustomFields = (customFields) => {
@@ -231,6 +292,84 @@ router.get('/stats/overview', [
   return res.json(payload);
 }));
 
+// @route   GET /api/persons/form-options
+// @desc    Get saved values for person form fields
+// @access  Private
+router.get('/form-options', [
+  authenticateToken,
+  checkGenderAccess
+], asyncHandler(async (req, res) => {
+  const filter = buildFormOptionsMatch(req.user);
+  const cacheKey = `${FORM_OPTIONS_CACHE_PREFIX}${req.user._id.toString()}:${JSON.stringify(filter)}`;
+  const cached = cache.get(cacheKey);
+  if (cached) {
+    return res.json(cached);
+  }
+
+  const [colleges, universities, residences, origins, customFieldData] = await Promise.all([
+    Person.distinct('college', filter),
+    Person.distinct('university', filter),
+    Person.distinct('residence', filter),
+    Person.distinct('origin', filter),
+    Person.aggregate([
+      { $match: filter },
+      {
+        $project: {
+          customPairs: { $objectToArray: { $ifNull: ['$customFields', {}] } }
+        }
+      },
+      { $unwind: '$customPairs' },
+      {
+        $project: {
+          key: { $trim: { input: { $toString: '$customPairs.k' } } },
+          value: { $trim: { input: { $toString: '$customPairs.v' } } }
+        }
+      },
+      {
+        $match: {
+          key: { $ne: '' },
+          value: { $ne: '' }
+        }
+      },
+      {
+        $group: {
+          _id: '$key',
+          values: { $addToSet: '$value' }
+        }
+      },
+      {
+        $project: {
+          _id: 0,
+          key: '$_id',
+          values: 1
+        }
+      }
+    ])
+  ]);
+
+  const customFieldKeys = normalizeOptionValues(customFieldData.map((entry) => entry.key));
+  const customFieldValuesByKey = {};
+  for (const entry of customFieldData) {
+    if (!entry || !entry.key) continue;
+    customFieldValuesByKey[entry.key] = normalizeOptionValues(entry.values);
+  }
+
+  const payload = {
+    success: true,
+    formOptions: {
+      college: normalizeOptionValues(colleges),
+      university: normalizeOptionValues(universities),
+      residence: normalizeOptionValues(residences),
+      origin: normalizeOptionValues(origins),
+      customFieldKeys,
+      customFieldValuesByKey
+    }
+  };
+
+  cache.set(cacheKey, payload, 60 * 1000);
+  return res.json(payload);
+}));
+
 // @route   GET /api/persons/:id
 // @desc    Get single person
 // @access  Private
@@ -249,8 +388,8 @@ router.get('/:id', [
     });
   }
 
-  // Check gender access
-  if (!hasGenderAccess(req.user, person.gender)) {
+  // Check access boundaries (gender + origin)
+  if (!hasGenderAccess(req.user, person.gender) || !hasOriginAccess(req.user, person.origin)) {
     return res.status(403).json({
       success: false,
       message: 'تم رفض الوصول'
@@ -281,6 +420,13 @@ router.post('/', [
     ...pickPersonPayload(req.body),
     createdBy: req.user._id
   };
+
+  if (!hasOriginAccess(req.user, personData.origin)) {
+    return res.status(403).json({
+      success: false,
+      message: 'تم رفض الوصول'
+    });
+  }
 
   const person = new Person(personData);
   await person.save();
@@ -317,8 +463,8 @@ router.put('/:id', [
     });
   }
 
-  // Check gender access
-  if (!hasGenderAccess(req.user, person.gender)) {
+  // Check access boundaries (gender + origin)
+  if (!hasGenderAccess(req.user, person.gender) || !hasOriginAccess(req.user, person.origin)) {
     return res.status(403).json({
       success: false,
       message: 'تم رفض الوصول'
@@ -326,6 +472,17 @@ router.put('/:id', [
   }
 
   const updateData = pickPersonPayload(req.body);
+  const targetOrigin = Object.prototype.hasOwnProperty.call(updateData, 'origin')
+    ? updateData.origin
+    : person.origin;
+
+  if (!hasOriginAccess(req.user, targetOrigin)) {
+    return res.status(403).json({
+      success: false,
+      message: 'تم رفض الوصول'
+    });
+  }
+
   Object.assign(person, updateData);
   await person.save();
   await person.populate('createdBy', 'username');
@@ -354,8 +511,8 @@ router.delete('/:id', [
     });
   }
 
-  // Check gender access
-  if (!hasGenderAccess(req.user, person.gender)) {
+  // Check access boundaries (gender + origin)
+  if (!hasGenderAccess(req.user, person.gender) || !hasOriginAccess(req.user, person.origin)) {
     return res.status(403).json({
       success: false,
       message: 'تم رفض الوصول'
@@ -384,7 +541,7 @@ router.post('/:id/notes', [
       .notEmpty()
       .withMessage('محتوى الملاحظة مطلوب')
       .isLength({ max: 500 })
-      .withMessage('محتوى الملاحظة طويل جداً')
+      .withMessage('محتوى الملاحظة طويل جدًا')
   ])
 ], asyncHandler(async (req, res) => {
   const { content } = req.body;
@@ -398,8 +555,8 @@ router.post('/:id/notes', [
     });
   }
 
-  // Check gender access
-  if (!hasGenderAccess(req.user, person.gender)) {
+  // Check access boundaries (gender + origin)
+  if (!hasGenderAccess(req.user, person.gender) || !hasOriginAccess(req.user, person.origin)) {
     return res.status(403).json({
       success: false,
       message: 'تم رفض الوصول'
@@ -444,8 +601,8 @@ router.delete('/:id/notes/:noteId', [
     });
   }
 
-  // Check gender access
-  if (!hasGenderAccess(req.user, person.gender)) {
+  // Check access boundaries (gender + origin)
+  if (!hasGenderAccess(req.user, person.gender) || !hasOriginAccess(req.user, person.origin)) {
     return res.status(403).json({
       success: false,
       message: 'تم رفض الوصول'

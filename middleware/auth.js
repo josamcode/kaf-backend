@@ -1,8 +1,8 @@
-const jwt = require('jsonwebtoken');
+﻿const jwt = require('jsonwebtoken');
 const Servant = require('../models/Servant');
 const { normalizeGender } = require('../utils/sanitize');
 
-// Middleware to verify JWT token
+// Middleware للتحقق من رمز الـ JWT
 const authenticateToken = async (req, res, next) => {
   try {
     const authHeader = req.headers['authorization'];
@@ -17,7 +17,7 @@ const authenticateToken = async (req, res, next) => {
 
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
     const servant = await Servant.findById(decoded.id)
-      .select('username role permissions genderAccess isActive')
+      .select('username role permissions genderAccess allowedOrigins isActive')
       .lean();
 
     if (!servant || !servant.isActive) {
@@ -32,23 +32,23 @@ const authenticateToken = async (req, res, next) => {
   } catch (error) {
     return res.status(403).json({
       success: false,
-      message: 'رمز غير صحيح'
+      message: 'رمز غير صالح'
     });
   }
 };
 
-// Middleware to check permissions
+// Middleware للتحقق من الصلاحيات
 const checkPermission = (requiredPermissions) => {
   return (req, res, next) => {
     const user = req.user;
     const userPermissions = Array.isArray(user.permissions) ? user.permissions : [];
 
-    // Super admin has all permissions
+    // المشرف العام يمتلك كل الصلاحيات
     if (user.role === 'super_admin') {
       return next();
     }
 
-    // Check if user has required permissions
+    // التحقق من امتلاك الصلاحيات المطلوبة
     const hasPermission = requiredPermissions.every(permission =>
       userPermissions.includes(permission)
     );
@@ -64,22 +64,22 @@ const checkPermission = (requiredPermissions) => {
   };
 };
 
-// Middleware to check gender access
+// Middleware للتحقق من صلاحية الوصول حسب النوع
 const checkGenderAccess = (req, res, next) => {
   const user = req.user;
   const requestedGender = normalizeGender(req.query.gender || req.body.gender);
 
-  // Super admin has access to all genders
+  // المشرف العام لديه صلاحية الوصول لكل الأنواع
   if (user.role === 'super_admin') {
     return next();
   }
 
-  // If no specific gender requested, check user's general access
+  // إذا لم يتم تحديد نوع معين
   if (!requestedGender) {
     return next();
   }
 
-  // Check if user can access the requested gender
+  // التحقق من إمكانية وصول المستخدم لهذا النوع
   const normalizedUserAccess = normalizeGender(user.genderAccess);
   if (normalizedUserAccess === 'both' || normalizedUserAccess === requestedGender) {
     return next();

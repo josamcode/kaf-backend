@@ -1,4 +1,4 @@
-const express = require('express');
+﻿const express = require('express');
 const jwt = require('jsonwebtoken');
 const { body, validationResult } = require('express-validator');
 const Servant = require('../models/Servant');
@@ -6,6 +6,7 @@ const { authenticateToken, checkPermission } = require('../middleware/auth');
 const { authRateLimiter } = require('../middleware/security');
 const asyncHandler = require('../utils/asyncHandler');
 const cache = require('../utils/cache');
+const { sanitizeOriginValues } = require('../utils/sanitize');
 
 const router = express.Router();
 
@@ -39,7 +40,15 @@ const validatePermissions = body('permissions')
   .isArray()
   .withMessage('الصلاحيات يجب أن تكون مصفوفة')
   .custom((permissions) => permissions.every((permission) => VALID_PERMISSIONS.has(permission)))
-  .withMessage('الصلاحيات يجب أن تكون مصفوفة');
+  .withMessage('الصلاحيات تحتوي على قيم غير مسموح بها');
+
+const validateAllowedOrigins = body('allowedOrigins')
+  .optional()
+  .custom((origins) => (
+    Array.isArray(origins)
+    && origins.every((origin) => typeof origin === 'string' && origin.trim().length > 0)
+  ))
+  .withMessage('قائمة الـ Origins غير صحيحة');
 
 // Generate JWT token
 const generateToken = (id) => jwt.sign({ id }, process.env.JWT_SECRET, { expiresIn: '7d' });
@@ -63,7 +72,7 @@ router.post('/login', [
 
   // Find servant by username
   const servant = await Servant.findOne({ username, isActive: true })
-    .select('username password role permissions genderAccess');
+    .select('username password role permissions genderAccess allowedOrigins');
 
   if (!servant) {
     return res.status(401).json({
@@ -90,7 +99,8 @@ router.post('/login', [
     username: servant.username,
     role: servant.role,
     permissions: servant.permissions,
-    genderAccess: servant.genderAccess
+    genderAccess: servant.genderAccess,
+    allowedOrigins: servant.allowedOrigins || []
   };
 
   return res.json({
@@ -112,7 +122,8 @@ router.get('/me', authenticateToken, (req, res) => {
       username: req.user.username,
       role: req.user.role,
       permissions: req.user.permissions,
-      genderAccess: req.user.genderAccess
+      genderAccess: req.user.genderAccess,
+      allowedOrigins: req.user.allowedOrigins || []
     }
   });
 });
@@ -132,12 +143,13 @@ router.post('/create-admin', [
       .isLength({ min: 6 })
       .withMessage('كلمة المرور يجب أن تكون 6 أحرف على الأقل'),
     validatePermissions,
+    validateAllowedOrigins,
     body('genderAccess')
       .isIn(['boys', 'girls', 'both'])
       .withMessage('صلاحية الوصول للنوع غير صحيحة')
   ])
 ], asyncHandler(async (req, res) => {
-  const { username, password, permissions, genderAccess } = req.body;
+  const { username, password, permissions, genderAccess, allowedOrigins } = req.body;
 
   // Check if username already exists
   const existingServant = await Servant.findOne({ username }).select('_id').lean();
@@ -154,6 +166,7 @@ router.post('/create-admin', [
     password,
     permissions,
     genderAccess,
+    allowedOrigins: sanitizeOriginValues(allowedOrigins),
     createdBy: req.user._id
   });
 
@@ -162,13 +175,14 @@ router.post('/create-admin', [
 
   return res.status(201).json({
     success: true,
-    message: 'تم إنشاء المدير بنجاح',
+    message: 'تم إنشاء الخادم بنجاح',
     admin: {
       id: newServant._id,
       username: newServant.username,
       role: newServant.role,
       permissions: newServant.permissions,
-      genderAccess: newServant.genderAccess
+      genderAccess: newServant.genderAccess,
+      allowedOrigins: newServant.allowedOrigins || []
     }
   });
 }));
@@ -187,7 +201,7 @@ router.get('/admins', [
   }
 
   const admins = await Servant.find({ isActive: true })
-    .select('username role permissions genderAccess createdAt createdBy')
+    .select('username role permissions genderAccess allowedOrigins createdAt createdBy')
     .populate('createdBy', 'username')
     .sort({ createdAt: -1 })
     .lean();
@@ -199,6 +213,7 @@ router.get('/admins', [
     role: admin.role,
     permissions: admin.permissions,
     genderAccess: admin.genderAccess,
+    allowedOrigins: admin.allowedOrigins || [],
     createdAt: admin.createdAt,
     createdBy: admin.createdBy
   }));
@@ -220,19 +235,20 @@ router.put('/admins/:id', [
   checkPermission(['manage_admins']),
   ...validate([
     validatePermissions,
+    validateAllowedOrigins,
     body('genderAccess')
       .isIn(['boys', 'girls', 'both'])
       .withMessage('صلاحية الوصول للنوع غير صحيحة')
   ])
 ], asyncHandler(async (req, res) => {
-  const { permissions, genderAccess } = req.body;
+  const { permissions, genderAccess, allowedOrigins } = req.body;
   const adminId = req.params.id;
 
   // Validate adminId
   if (!adminId || adminId === 'undefined') {
     return res.status(400).json({
       success: false,
-      message: 'معرف المدير غير صحيح'
+      message: 'معرّف الخادم غير صحيح'
     });
   }
 
@@ -241,24 +257,28 @@ router.put('/admins/:id', [
   if (!admin || admin.role === 'super_admin') {
     return res.status(400).json({
       success: false,
-      message: 'لا يمكن تعديل المدير الرئيسي'
+      message: 'لا يمكن تعديل الخادم الرئيسي'
     });
   }
 
   admin.permissions = permissions;
   admin.genderAccess = genderAccess;
+  if (Object.prototype.hasOwnProperty.call(req.body, 'allowedOrigins')) {
+    admin.allowedOrigins = sanitizeOriginValues(allowedOrigins);
+  }
   await admin.save();
   cache.delByPrefix(ADMIN_CACHE_PREFIX);
 
   return res.json({
     success: true,
-    message: 'تم تحديث المدير بنجاح',
+    message: 'تم تحديث الخادم بنجاح',
     admin: {
       id: admin._id,
       username: admin.username,
       role: admin.role,
       permissions: admin.permissions,
-      genderAccess: admin.genderAccess
+      genderAccess: admin.genderAccess,
+      allowedOrigins: admin.allowedOrigins || []
     }
   });
 }));
@@ -276,7 +296,7 @@ router.delete('/admins/:id', [
   if (!adminId || adminId === 'undefined') {
     return res.status(400).json({
       success: false,
-      message: 'معرف المدير غير صحيح'
+      message: 'معرّف الخادم غير صحيح'
     });
   }
 
@@ -285,7 +305,7 @@ router.delete('/admins/:id', [
   if (!admin || admin.role === 'super_admin') {
     return res.status(400).json({
       success: false,
-      message: 'لا يمكن حذف المدير الرئيسي'
+      message: 'لا يمكن حذف الخادم الرئيسي'
     });
   }
 
@@ -295,7 +315,7 @@ router.delete('/admins/:id', [
 
   return res.json({
     success: true,
-    message: 'تم حذف المدير بنجاح'
+    message: 'تم حذف الخادم بنجاح'
   });
 }));
 

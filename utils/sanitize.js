@@ -1,6 +1,7 @@
-const DANGEROUS_KEYS = new Set(['__proto__', 'prototype', 'constructor']);
+﻿const DANGEROUS_KEYS = new Set(['__proto__', 'prototype', 'constructor']);
 
 const escapeRegExp = (value = '') => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const normalizeWhitespace = (value = '') => String(value).replace(/\s+/g, ' ').trim();
 
 const normalizeGender = (value) => {
   if (!value || typeof value !== 'string') {
@@ -12,6 +13,33 @@ const normalizeGender = (value) => {
   if (normalized === 'girl' || normalized === 'girls') return 'girl';
   if (normalized === 'both') return 'both';
   return null;
+};
+
+const normalizeOrigin = (value) => {
+  if (!value || typeof value !== 'string') return '';
+  return normalizeWhitespace(value).toLocaleLowerCase();
+};
+
+const sanitizeOriginValues = (values) => {
+  if (!Array.isArray(values)) return [];
+
+  const unique = [];
+  const seen = new Set();
+  for (const value of values) {
+    if (typeof value !== 'string') continue;
+    const cleaned = normalizeWhitespace(value);
+    if (!cleaned) continue;
+    const normalized = normalizeOrigin(cleaned);
+    if (seen.has(normalized)) continue;
+    seen.add(normalized);
+    unique.push(cleaned);
+  }
+  return unique;
+};
+
+const buildExactOriginRegex = (origin) => {
+  const normalized = normalizeWhitespace(origin);
+  return new RegExp(`^\\s*${escapeRegExp(normalized)}\\s*$`, 'i');
 };
 
 const sanitizeValue = (value) => {
@@ -43,5 +71,9 @@ const sanitizeRequest = (req, _res, next) => {
 module.exports = {
   escapeRegExp,
   normalizeGender,
+  normalizeOrigin,
+  sanitizeOriginValues,
+  buildExactOriginRegex,
   sanitizeRequest
 };
+

@@ -9,7 +9,7 @@ const apiRateLimiter = rateLimit({
   legacyHeaders: false,
   message: {
     success: false,
-    message: 'Too many requests, please try again later'
+    message: 'عدد الطلبات كبير جدًا، يرجى المحاولة مرة أخرى لاحقًا'
   },
   skip: (req) => req.path === '/api/health'
 });
@@ -21,7 +21,7 @@ const authRateLimiter = rateLimit({
   legacyHeaders: false,
   message: {
     success: false,
-    message: 'Too many login attempts, please try again later'
+    message: 'عدد محاولات تسجيل الدخول كبير جدًا، يرجى المحاولة مرة أخرى لاحقًا'
   }
 });
 

@@ -88,7 +88,7 @@ const createSuperAdmin = async () => {
 
     await newSuperAdmin.save();
   } catch (error) {
-    console.error('خطأ في إنشاء المدير الرئيسي:', error.message);
+    console.error('خطأ في إنشاء الخادم الرئيسي:', error.message);
   }
 };
 
