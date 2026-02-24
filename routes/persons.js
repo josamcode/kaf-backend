@@ -1,4 +1,4 @@
-﻿const express = require('express');
+const express = require('express');
 const { body, query, validationResult } = require('express-validator');
 const Person = require('../models/Person');
 const { authenticateToken, checkPermission, checkGenderAccess } = require('../middleware/auth');
@@ -263,29 +263,35 @@ router.get('/', [
   ...validate([
     query('page').optional().isInt({ min: 1 }),
     query('limit').optional().isInt({ min: 1, max: 200 }),
+    query('noLimit').optional().isBoolean(),
     query('gender').optional().isIn(['boy', 'girl']),
     query('year')
       .optional()
       .custom((value) => ALLOWED_YEARS.has(normalizeYearValue(value)))
   ])
 ], asyncHandler(async (req, res) => {
+  const noLimit = String(req.query.noLimit || '').toLowerCase() === 'true';
   const { page, limit } = parsePagination(req.query.page, req.query.limit);
   const filter = buildPersonFilter({ queryParams: req.query, user: req.user });
-  const skip = (page - 1) * limit;
-  const cacheKey = `${PERSONS_CACHE_PREFIX}${req.user._id.toString()}:${JSON.stringify(filter)}:${page}:${limit}`;
+  const currentPage = noLimit ? 1 : page;
+  const skip = (currentPage - 1) * limit;
+  const cacheKey = `${PERSONS_CACHE_PREFIX}${req.user._id.toString()}:${JSON.stringify(filter)}:${currentPage}:${limit}:${noLimit ? 'all' : 'paged'}`;
   const cached = cache.get(cacheKey);
   if (cached) {
     return res.json(cached);
   }
 
+  const personsQuery = Person.find(filter)
+    .populate('createdBy', 'username')
+    .populate('notes.createdBy', 'username')
+    .sort({ createdAt: -1 });
+
+  if (!noLimit) {
+    personsQuery.skip(skip).limit(limit);
+  }
+
   const [persons, total] = await Promise.all([
-    Person.find(filter)
-      .populate('createdBy', 'username')
-      .populate('notes.createdBy', 'username')
-      .sort({ createdAt: -1 })
-      .skip(skip)
-      .limit(limit)
-      .lean(),
+    personsQuery.lean(),
     Person.countDocuments(filter)
   ]);
 
@@ -293,8 +299,8 @@ router.get('/', [
     success: true,
     persons,
     pagination: {
-      current: page,
-      pages: Math.ceil(total / limit),
+      current: currentPage,
+      pages: noLimit ? 1 : Math.ceil(total / limit),
       total
     }
   };
