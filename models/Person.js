@@ -90,5 +90,8 @@ const personSchema = new mongoose.Schema({
 personSchema.index({ gender: 1, year: 1 });
 personSchema.index({ origin: 1 });
 personSchema.index({ createdBy: 1 });
+personSchema.index({ isActive: 1, createdAt: -1 });
+personSchema.index({ isActive: 1, gender: 1, createdAt: -1 });
+personSchema.index({ isActive: 1, gender: 1, year: 1 });
 
 module.exports = mongoose.model('Person', personSchema);

@@ -1,5 +1,6 @@
 const jwt = require('jsonwebtoken');
 const Servant = require('../models/Servant');
+const { normalizeGender } = require('../utils/sanitize');
 
 // Middleware to verify JWT token
 const authenticateToken = async (req, res, next) => {
@@ -15,7 +16,9 @@ const authenticateToken = async (req, res, next) => {
     }
 
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
-    const servant = await Servant.findById(decoded.id).select('-password');
+    const servant = await Servant.findById(decoded.id)
+      .select('username role permissions genderAccess isActive')
+      .lean();
 
     if (!servant || !servant.isActive) {
       return res.status(401).json({
@@ -38,6 +41,7 @@ const authenticateToken = async (req, res, next) => {
 const checkPermission = (requiredPermissions) => {
   return (req, res, next) => {
     const user = req.user;
+    const userPermissions = Array.isArray(user.permissions) ? user.permissions : [];
 
     // Super admin has all permissions
     if (user.role === 'super_admin') {
@@ -46,7 +50,7 @@ const checkPermission = (requiredPermissions) => {
 
     // Check if user has required permissions
     const hasPermission = requiredPermissions.every(permission =>
-      user.permissions.includes(permission)
+      userPermissions.includes(permission)
     );
 
     if (!hasPermission) {
@@ -63,7 +67,7 @@ const checkPermission = (requiredPermissions) => {
 // Middleware to check gender access
 const checkGenderAccess = (req, res, next) => {
   const user = req.user;
-  const requestedGender = req.query.gender || req.body.gender;
+  const requestedGender = normalizeGender(req.query.gender || req.body.gender);
 
   // Super admin has access to all genders
   if (user.role === 'super_admin') {
@@ -76,7 +80,8 @@ const checkGenderAccess = (req, res, next) => {
   }
 
   // Check if user can access the requested gender
-  if (user.genderAccess === 'both' || user.genderAccess === requestedGender) {
+  const normalizedUserAccess = normalizeGender(user.genderAccess);
+  if (normalizedUserAccess === 'both' || normalizedUserAccess === requestedGender) {
     return next();
   }
 

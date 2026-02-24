@@ -55,4 +55,7 @@ servantSchema.methods.comparePassword = async function (candidatePassword) {
   return await bcrypt.compare(candidatePassword, this.password);
 };
 
+servantSchema.index({ username: 1 }, { unique: true });
+servantSchema.index({ isActive: 1, role: 1, createdAt: -1 });
+
 module.exports = mongoose.model('Servant', servantSchema);
