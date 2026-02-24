@@ -133,6 +133,49 @@ const buildFormOptionsMatch = (user) => {
   return appendOriginAccessToFilter(filter, user);
 };
 
+const buildTopTextFieldPipeline = (filter, fieldName, limit = 10) => ([
+  { $match: filter },
+  {
+    $project: {
+      value: {
+        $trim: {
+          input: {
+            $toString: {
+              $ifNull: [`$${fieldName}`, '']
+            }
+          }
+        }
+      }
+    }
+  },
+  { $match: { value: { $ne: '' } } },
+  { $group: { _id: '$value', count: { $sum: 1 } } },
+  { $sort: { count: -1 } },
+  { $limit: limit }
+]);
+
+const buildCustomPairsBasePipeline = (filter) => ([
+  { $match: filter },
+  {
+    $project: {
+      customPairs: { $objectToArray: { $ifNull: ['$customFields', {}] } }
+    }
+  },
+  { $unwind: '$customPairs' },
+  {
+    $project: {
+      key: { $trim: { input: { $toString: '$customPairs.k' } } },
+      value: { $trim: { input: { $toString: '$customPairs.v' } } }
+    }
+  },
+  {
+    $match: {
+      key: { $ne: '' },
+      value: { $ne: '' }
+    }
+  }
+]);
+
 const buildPersonFilter = ({ queryParams, user }) => {
   const { gender, year, origin, college, university, search } = queryParams;
   const filter = { isActive: true };
@@ -279,7 +322,8 @@ router.get('/stats/overview', [
   }
 
   const genderForFilter = filter.gender;
-  const [totalCount, boysCount, girlsCount, yearStats, originStats] = await Promise.all([
+  const customPairsBase = buildCustomPairsBasePipeline(filter);
+  const [totalCount, boysCount, girlsCount, yearStats, originStats, collegeStats, universityStats, servantStats, noteAuthorStats, notesSummaryAgg, customFieldsSummaryAgg, customFieldKeysCountAgg, topCustomFields, customFieldDetails, uniqueServantsContributedAgg] = await Promise.all([
     Person.countDocuments(filter),
     genderForFilter && genderForFilter !== 'boy'
       ? 0
@@ -297,8 +341,187 @@ router.get('/stats/overview', [
       { $group: { _id: '$origin', count: { $sum: 1 } } },
       { $sort: { count: -1 } },
       { $limit: 10 }
+    ]),
+    Person.aggregate(buildTopTextFieldPipeline(filter, 'college', 8)),
+    Person.aggregate(buildTopTextFieldPipeline(filter, 'university', 8)),
+    Person.aggregate([
+      { $match: filter },
+      { $group: { _id: '$createdBy', count: { $sum: 1 } } },
+      { $sort: { count: -1 } },
+      { $limit: 8 },
+      {
+        $lookup: {
+          from: 'servants',
+          localField: '_id',
+          foreignField: '_id',
+          as: 'servant'
+        }
+      },
+      {
+        $unwind: {
+          path: '$servant',
+          preserveNullAndEmptyArrays: true
+        }
+      },
+      {
+        $project: {
+          _id: {
+            $ifNull: [
+              '$servant.username',
+              {
+                $concat: ['#', { $toString: '$_id' }]
+              }
+            ]
+          },
+          count: 1
+        }
+      }
+    ]),
+    Person.aggregate([
+      { $match: filter },
+      { $unwind: '$notes' },
+      { $group: { _id: '$notes.createdBy', count: { $sum: 1 } } },
+      { $sort: { count: -1 } },
+      { $limit: 8 },
+      {
+        $lookup: {
+          from: 'servants',
+          localField: '_id',
+          foreignField: '_id',
+          as: 'servant'
+        }
+      },
+      {
+        $unwind: {
+          path: '$servant',
+          preserveNullAndEmptyArrays: true
+        }
+      },
+      {
+        $project: {
+          _id: {
+            $ifNull: [
+              '$servant.username',
+              {
+                $concat: ['#', { $toString: '$_id' }]
+              }
+            ]
+          },
+          count: 1
+        }
+      }
+    ]),
+    Person.aggregate([
+      { $match: filter },
+      {
+        $project: {
+          notesCount: { $size: { $ifNull: ['$notes', []] } }
+        }
+      },
+      {
+        $group: {
+          _id: null,
+          notesTotal: { $sum: '$notesCount' },
+          personsWithNotes: {
+            $sum: {
+              $cond: [{ $gt: ['$notesCount', 0] }, 1, 0]
+            }
+          }
+        }
+      }
+    ]),
+    Person.aggregate([
+      { $match: filter },
+      {
+        $project: {
+          customPairs: { $objectToArray: { $ifNull: ['$customFields', {}] } }
+        }
+      },
+      {
+        $project: {
+          pairCount: { $size: '$customPairs' }
+        }
+      },
+      {
+        $group: {
+          _id: null,
+          personsWithCustomFields: {
+            $sum: {
+              $cond: [{ $gt: ['$pairCount', 0] }, 1, 0]
+            }
+          },
+          customFieldsTotalEntries: { $sum: '$pairCount' }
+        }
+      }
+    ]),
+    Person.aggregate([
+      ...customPairsBase,
+      { $group: { _id: '$key' } },
+      { $count: 'count' }
+    ]),
+    Person.aggregate([
+      ...customPairsBase,
+      {
+        $group: {
+          _id: '$key',
+          count: { $sum: 1 },
+          uniqueValues: { $addToSet: '$value' }
+        }
+      },
+      {
+        $project: {
+          _id: 1,
+          count: 1,
+          uniqueValuesCount: { $size: '$uniqueValues' }
+        }
+      },
+      { $sort: { count: -1 } },
+      { $limit: 10 }
+    ]),
+    Person.aggregate([
+      ...customPairsBase,
+      {
+        $group: {
+          _id: { key: '$key', value: '$value' },
+          count: { $sum: 1 }
+        }
+      },
+      { $sort: { '_id.key': 1, count: -1 } },
+      {
+        $group: {
+          _id: '$_id.key',
+          totalCount: { $sum: '$count' },
+          uniqueValuesCount: { $sum: 1 },
+          topValues: {
+            $push: {
+              value: '$_id.value',
+              count: '$count'
+            }
+          }
+        }
+      },
+      {
+        $project: {
+          _id: 1,
+          totalCount: 1,
+          uniqueValuesCount: 1,
+          topValues: { $slice: ['$topValues', 5] }
+        }
+      },
+      { $sort: { totalCount: -1 } },
+      { $limit: 6 }
+    ]),
+    Person.aggregate([
+      { $match: filter },
+      { $group: { _id: '$createdBy' } },
+      { $count: 'count' }
     ])
   ]);
+
+  const notesSummary = notesSummaryAgg[0] || {};
+  const customFieldsSummary = customFieldsSummaryAgg[0] || {};
+  const customFieldKeysCount = customFieldKeysCountAgg[0]?.count || 0;
+  const uniqueServantsContributed = uniqueServantsContributedAgg[0]?.count || 0;
 
   const payload = {
     success: true,
@@ -307,7 +530,19 @@ router.get('/stats/overview', [
       boys: boysCount,
       girls: girlsCount,
       byYear: yearStats,
-      topOrigins: originStats
+      topOrigins: originStats,
+      topColleges: collegeStats,
+      topUniversities: universityStats,
+      topServants: servantStats,
+      topNoteAuthors: noteAuthorStats,
+      notesTotal: notesSummary.notesTotal || 0,
+      personsWithNotes: notesSummary.personsWithNotes || 0,
+      personsWithCustomFields: customFieldsSummary.personsWithCustomFields || 0,
+      customFieldsTotalEntries: customFieldsSummary.customFieldsTotalEntries || 0,
+      customFieldKeysCount,
+      uniqueServantsContributed,
+      topCustomFields,
+      customFieldDetails
     }
   };
 
