@@ -1,4 +1,5 @@
 const express = require('express');
+const mongoose = require('mongoose');
 const { body, query, validationResult } = require('express-validator');
 const Person = require('../models/Person');
 const { authenticateToken, checkPermission, checkGenderAccess } = require('../middleware/auth');
@@ -17,7 +18,15 @@ const router = express.Router();
 const STATS_CACHE_PREFIX = 'persons:stats:';
 const PERSONS_CACHE_PREFIX = 'persons:list:';
 const FORM_OPTIONS_CACHE_PREFIX = 'persons:form-options:';
-const PERSON_WRITE_CACHE_PREFIXES = [STATS_CACHE_PREFIX, PERSONS_CACHE_PREFIX, FORM_OPTIONS_CACHE_PREFIX];
+const NOTES_LIST_CACHE_PREFIX = 'persons:notes:list:';
+const NOTES_FILTER_OPTIONS_CACHE_PREFIX = 'persons:notes:filter-options:';
+const PERSON_WRITE_CACHE_PREFIXES = [
+  STATS_CACHE_PREFIX,
+  PERSONS_CACHE_PREFIX,
+  FORM_OPTIONS_CACHE_PREFIX,
+  NOTES_LIST_CACHE_PREFIX,
+  NOTES_FILTER_OPTIONS_CACHE_PREFIX
+];
 const ALLOWED_YEARS = new Set([1, 2, 3, 4, 5, 'graduated']);
 const PERSON_MUTABLE_FIELDS = new Set([
   'name',
@@ -176,7 +185,7 @@ const buildCustomPairsBasePipeline = (filter) => ([
   }
 ]);
 
-const buildPersonFilter = ({ queryParams, user }) => {
+const buildPersonFilter = ({ queryParams, user, includeSearch = true }) => {
   const { gender, year, origin, college, university, search } = queryParams;
   const filter = { isActive: true };
 
@@ -202,7 +211,7 @@ const buildPersonFilter = ({ queryParams, user }) => {
   if (university) filter.university = new RegExp(escapeRegExp(String(university).trim()), 'i');
 
   // Search filter
-  if (search) {
+  if (includeSearch && search) {
     const safeSearch = new RegExp(escapeRegExp(String(search).trim()), 'i');
     filter.$or = [
       { name: safeSearch },
@@ -214,6 +223,75 @@ const buildPersonFilter = ({ queryParams, user }) => {
   }
 
   return appendOriginAccessToFilter(filter, user);
+};
+
+const buildNotesSearchMatch = (search) => {
+  if (!search) return null;
+
+  const safeSearch = new RegExp(escapeRegExp(String(search).trim()), 'i');
+  return {
+    $or: [
+      { 'notes.content': safeSearch },
+      { name: safeSearch },
+      { origin: safeSearch },
+      { college: safeSearch },
+      { university: safeSearch },
+      { residence: safeSearch },
+      { 'noteAuthor.username': safeSearch }
+    ]
+  };
+};
+
+const buildNotesAggregationStages = ({ personFilter, search, authorId }) => {
+  const stages = [
+    { $match: personFilter },
+    {
+      $project: {
+        name: 1,
+        gender: 1,
+        year: 1,
+        origin: 1,
+        phone: 1,
+        college: 1,
+        university: 1,
+        residence: 1,
+        notes: 1
+      }
+    },
+    { $unwind: '$notes' }
+  ];
+
+  if (authorId) {
+    stages.push({
+      $match: {
+        'notes.createdBy': new mongoose.Types.ObjectId(authorId)
+      }
+    });
+  }
+
+  stages.push(
+    {
+      $lookup: {
+        from: 'servants',
+        localField: 'notes.createdBy',
+        foreignField: '_id',
+        as: 'noteAuthor'
+      }
+    },
+    {
+      $unwind: {
+        path: '$noteAuthor',
+        preserveNullAndEmptyArrays: true
+      }
+    }
+  );
+
+  const notesSearchMatch = buildNotesSearchMatch(search);
+  if (notesSearchMatch) {
+    stages.push({ $match: notesSearchMatch });
+  }
+
+  return stages;
 };
 
 const toSafeCustomFields = (customFields) => {
@@ -631,6 +709,177 @@ router.get('/form-options', [
   };
 
   cache.set(cacheKey, payload, 60 * 1000);
+  return res.json(payload);
+}));
+
+// @route   GET /api/persons/notes/filter-options
+// @desc    Get filter options for the notes page
+// @access  Private (with manage_notes permission)
+router.get('/notes/filter-options', [
+  authenticateToken,
+  checkPermission(['manage_notes']),
+  checkGenderAccess,
+  ...validate([
+    query('gender').optional().isIn(['boy', 'girl']),
+    query('year')
+      .optional()
+      .custom((value) => ALLOWED_YEARS.has(normalizeYearValue(value)))
+  ])
+], asyncHandler(async (req, res) => {
+  const personFilter = buildPersonFilter({
+    queryParams: req.query,
+    user: req.user,
+    includeSearch: false
+  });
+
+  const cacheKey = `${NOTES_FILTER_OPTIONS_CACHE_PREFIX}${req.user._id.toString()}:${JSON.stringify(personFilter)}`;
+  const cached = cache.get(cacheKey);
+  if (cached) {
+    return res.json(cached);
+  }
+
+  const [origins, authorsAgg] = await Promise.all([
+    Person.distinct('origin', personFilter),
+    Person.aggregate([
+      { $match: personFilter },
+      { $unwind: '$notes' },
+      { $group: { _id: '$notes.createdBy' } },
+      {
+        $lookup: {
+          from: 'servants',
+          localField: '_id',
+          foreignField: '_id',
+          as: 'servant'
+        }
+      },
+      {
+        $unwind: {
+          path: '$servant',
+          preserveNullAndEmptyArrays: true
+        }
+      },
+      {
+        $project: {
+          _id: 0,
+          value: { $toString: '$_id' },
+          label: {
+            $ifNull: [
+              '$servant.username',
+              {
+                $concat: ['#', { $toString: '$_id' }]
+              }
+            ]
+          }
+        }
+      }
+    ])
+  ]);
+
+  const authors = authorsAgg.sort((a, b) =>
+    String(a.label || '').localeCompare(String(b.label || ''), 'ar', {
+      sensitivity: 'base'
+    })
+  );
+
+  const payload = {
+    success: true,
+    filterOptions: {
+      origins: normalizeOptionValues(origins),
+      authors
+    }
+  };
+
+  cache.set(cacheKey, payload, 60 * 1000);
+  return res.json(payload);
+}));
+
+// @route   GET /api/persons/notes
+// @desc    Get all accessible notes with filters
+// @access  Private (with manage_notes permission)
+router.get('/notes', [
+  authenticateToken,
+  checkPermission(['manage_notes']),
+  checkGenderAccess,
+  ...validate([
+    query('page').optional().isInt({ min: 1 }),
+    query('limit').optional().isInt({ min: 1, max: 100 }),
+    query('gender').optional().isIn(['boy', 'girl']),
+    query('authorId').optional().isMongoId(),
+    query('year')
+      .optional()
+      .custom((value) => ALLOWED_YEARS.has(normalizeYearValue(value)))
+  ])
+], asyncHandler(async (req, res) => {
+  const { page, limit } = parsePagination(req.query.page, req.query.limit);
+  const skip = (page - 1) * limit;
+  const personFilter = buildPersonFilter({
+    queryParams: req.query,
+    user: req.user,
+    includeSearch: false
+  });
+  const search = String(req.query.search || '').trim();
+  const authorId = req.query.authorId ? String(req.query.authorId) : undefined;
+  const cacheKey = `${NOTES_LIST_CACHE_PREFIX}${req.user._id.toString()}:${JSON.stringify(personFilter)}:${search}:${authorId || 'all'}:${page}:${limit}`;
+  const cached = cache.get(cacheKey);
+  if (cached) {
+    return res.json(cached);
+  }
+
+  const notesBaseStages = buildNotesAggregationStages({
+    personFilter,
+    search,
+    authorId
+  });
+
+  const aggregateResult = await Person.aggregate([
+    ...notesBaseStages,
+    { $sort: { 'notes.createdAt': -1, _id: -1 } },
+    {
+      $facet: {
+        notes: [
+          { $skip: skip },
+          { $limit: limit },
+          {
+            $project: {
+              _id: '$notes._id',
+              content: '$notes.content',
+              createdAt: '$notes.createdAt',
+              createdBy: {
+                _id: '$notes.createdBy',
+                username: { $ifNull: ['$noteAuthor.username', 'Unknown'] }
+              },
+              person: {
+                _id: '$_id',
+                name: '$name',
+                gender: '$gender',
+                year: '$year',
+                origin: '$origin',
+                phone: '$phone',
+                college: '$college',
+                university: '$university',
+                residence: '$residence'
+              }
+            }
+          }
+        ],
+        totalCount: [{ $count: 'count' }]
+      }
+    }
+  ]);
+
+  const result = aggregateResult[0] || { notes: [], totalCount: [] };
+  const total = result.totalCount[0]?.count || 0;
+  const payload = {
+    success: true,
+    notes: result.notes,
+    pagination: {
+      current: page,
+      pages: Math.max(Math.ceil(total / limit), 1),
+      total
+    }
+  };
+
+  cache.set(cacheKey, payload, 20 * 1000);
   return res.json(payload);
 }));
 
