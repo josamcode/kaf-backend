@@ -131,6 +131,18 @@ const normalizeOptionValues = (values) => {
   )].sort((a, b) => a.localeCompare(b, 'ar', { sensitivity: 'base' }));
 };
 
+const serializeCacheSegment = (value) => JSON.stringify(value, (_key, currentValue) => {
+  if (currentValue instanceof RegExp) {
+    return {
+      type: 'regex',
+      source: currentValue.source,
+      flags: currentValue.flags
+    };
+  }
+
+  return currentValue;
+});
+
 const buildFormOptionsMatch = (user) => {
   const filter = { isActive: true };
   if (user.role !== 'super_admin') {
@@ -353,7 +365,7 @@ router.get('/', [
   const filter = buildPersonFilter({ queryParams: req.query, user: req.user });
   const currentPage = noLimit ? 1 : page;
   const skip = (currentPage - 1) * limit;
-  const cacheKey = `${PERSONS_CACHE_PREFIX}${req.user._id.toString()}:${JSON.stringify(filter)}:${currentPage}:${limit}:${noLimit ? 'all' : 'paged'}`;
+  const cacheKey = `${PERSONS_CACHE_PREFIX}${req.user._id.toString()}:${serializeCacheSegment(filter)}:${currentPage}:${limit}:${noLimit ? 'all' : 'paged'}`;
   const cached = cache.get(cacheKey);
   if (cached) {
     return res.json(cached);
@@ -399,7 +411,7 @@ router.get('/stats/overview', [
     user: req.user
   });
 
-  const cacheKey = `${STATS_CACHE_PREFIX}${req.user._id.toString()}:${JSON.stringify(filter)}`;
+  const cacheKey = `${STATS_CACHE_PREFIX}${req.user._id.toString()}:${serializeCacheSegment(filter)}`;
   const cached = cache.get(cacheKey);
   if (cached) {
     return res.json(cached);
@@ -642,7 +654,7 @@ router.get('/form-options', [
   checkGenderAccess
 ], asyncHandler(async (req, res) => {
   const filter = buildFormOptionsMatch(req.user);
-  const cacheKey = `${FORM_OPTIONS_CACHE_PREFIX}${req.user._id.toString()}:${JSON.stringify(filter)}`;
+  const cacheKey = `${FORM_OPTIONS_CACHE_PREFIX}${req.user._id.toString()}:${serializeCacheSegment(filter)}`;
   const cached = cache.get(cacheKey);
   if (cached) {
     return res.json(cached);
@@ -732,7 +744,7 @@ router.get('/notes/filter-options', [
     includeSearch: false
   });
 
-  const cacheKey = `${NOTES_FILTER_OPTIONS_CACHE_PREFIX}${req.user._id.toString()}:${JSON.stringify(personFilter)}`;
+  const cacheKey = `${NOTES_FILTER_OPTIONS_CACHE_PREFIX}${req.user._id.toString()}:${serializeCacheSegment(personFilter)}`;
   const cached = cache.get(cacheKey);
   if (cached) {
     return res.json(cached);
@@ -819,7 +831,7 @@ router.get('/notes', [
   });
   const search = String(req.query.search || '').trim();
   const authorId = req.query.authorId ? String(req.query.authorId) : undefined;
-  const cacheKey = `${NOTES_LIST_CACHE_PREFIX}${req.user._id.toString()}:${JSON.stringify(personFilter)}:${search}:${authorId || 'all'}:${page}:${limit}`;
+  const cacheKey = `${NOTES_LIST_CACHE_PREFIX}${req.user._id.toString()}:${serializeCacheSegment(personFilter)}:${search}:${authorId || 'all'}:${page}:${limit}`;
   const cached = cache.get(cacheKey);
   if (cached) {
     return res.json(cached);
