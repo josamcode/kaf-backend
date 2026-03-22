@@ -1,15 +1,15 @@
-# fly.toml app configuration file generated for kaf-backend on 2026-02-24T02:02:10Z
+# fly.toml app configuration file generated for kaf-backend-3qjahq on 2026-03-22T20:44:39Z
 #
 # See https://fly.io/docs/reference/configuration/ for information about how to use this file.
 #
 
-app = 'kaf-backend'
+app = 'kaf-backend-3qjahq'
 primary_region = 'ams'
 
 [build]
 
 [http_service]
-  internal_port = 5000
+  internal_port = 8080
   force_https = true
   auto_stop_machines = 'stop'
   auto_start_machines = true
